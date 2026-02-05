@@ -498,6 +498,11 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::initializeWheel(int whee
   gz::sim::Link steerLink(wheel.steerEntity);
   steerLink.EnableVelocityChecks(_ecm, true);
 
+  // Request WorldPose component for the model (needed for computeWheelLoad)
+  if (wheel_idx == 0 && !_ecm.Component<gz::sim::components::WorldPose>(modelEntity_)) {
+    _ecm.CreateComponent(modelEntity_, gz::sim::components::WorldPose());
+  }
+
   // Get wheel position
   auto poseComp = _ecm.Component<gz::sim::components::Pose>(wheel.linkEntity);
   gz::math::Vector3d wheel_pos_in_model;
@@ -877,8 +882,12 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeWheelLoad(gz::sim
   // to the rover orientation wrt to gravity direction
   // this does not account for dynamics effects (curves and acceleration/deceleration),
   // and always considers all 4 wheels in contact with the terrain
-  
+
   auto poseComp = _ecm.Component<gz::sim::components::WorldPose>(modelEntity_);
+  if (!poseComp) {
+    gzerr << "WorldPose component not available for model" << std::endl;
+    return;
+  }
   gz::math::Quaterniond rover_orient = poseComp->Data().Rot();
 
   // rover (and assumed terrain) inclinations around lateral & longitudinal axis
@@ -927,8 +936,6 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setWheelStateParams(int 
   auto angularVelComp = _ecm.Component<gz::sim::components::AngularVelocity>(wheel.linkEntity);
   if(angularVelComp) {
       wheel.stateParam.omega = angularVelComp->Data().Y();
-      gzmsg << wheel.name << " raw WorldAngVel: "
-            << angularVelComp->Data() << std::endl;
   }
 
   // Change sign where necessary so that omega > 0 for forward movement
@@ -1177,8 +1184,8 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
       setSoilParams(i, _ecm);
       setWheelStateParams(i, _ecm);
 
-      // gzmsg << wheels[i].name << ": soil=" << wheels[i].soilParam.name 
-      // << " omega=" << wheels[i].stateParam.omega << std::endl;
+      gzmsg << wheels[i].name << ": soil=" << wheels[i].soilParam.name 
+      << " omega=" << wheels[i].stateParam.omega << std::endl;
     }    
 
     // 2. Perform computations (parallel - safe)
@@ -1202,11 +1209,13 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
     // 3. Apply forces (serial - safe)
     for (int i = 0; i < num_wheels; i++) {
         if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam.r_s) < 0.02) {
-            if (! this -> options.passive_plugin)
+            // Only zero velocities when wheel is in contact with terrain,
+            // otherwise gravity free-fall is blocked
+            if (!this->options.passive_plugin && !getTerrainBelow(i, _ecm).empty())
             {
                 gz::sim::Link link(wheels[i].linkEntity);
                 link.SetLinearVelocity(_ecm, gz::math::Vector3d::Zero);
-                link.SetAngularVelocity(_ecm, gz::math::Vector3d::Zero); 
+                link.SetAngularVelocity(_ecm, gz::math::Vector3d::Zero);
             }
             continue;
         }
