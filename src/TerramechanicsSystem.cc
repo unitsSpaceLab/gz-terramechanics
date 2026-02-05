@@ -1184,9 +1184,11 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
       setSoilParams(i, _ecm);
       setWheelStateParams(i, _ecm);
 
-      gzmsg << wheels[i].name << ": soil=" << wheels[i].soilParam.name 
-      << " omega=" << wheels[i].stateParam.omega << std::endl;
-    }    
+      // if (this->debug) {
+      //   gzmsg << wheels[i].name << ": soil=" << wheels[i].soilParam.name
+      //   << " omega=" << wheels[i].stateParam.omega << std::endl;
+      // }
+    }
 
     // 2. Perform computations (parallel - safe)
     #pragma omp parallel for schedule(dynamic)
