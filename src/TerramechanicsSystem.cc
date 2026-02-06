@@ -18,8 +18,13 @@
 #include <gz/sim/components/World.hh>
 #include <gz/sim/components/Name.hh>
 #include <gz/sim/components/ContactSensorData.hh>
- #include <gz/sim/Joint.hh>
+#include <gz/sim/Joint.hh>
 
+
+
+//Queste variabili sono dichiarate nel codice ma non vengono mai utilizzate: counter_ non viene mai letto né scritto, collision_name non viene mai impostato
+ //  né letto, prev_contact_name viene solo inizializzato ma mai usato, e WheelState::v viene calcolato alla riga 960 ma il suo valore non viene mai letto da 
+ // nessuna parte.  
 
 
 using namespace gz_terramechanics;
@@ -166,7 +171,6 @@ struct TunedParams {
   std::array<WheelData, num_wheels> wheels;
 
   WheelParams globalWheelParams;
-  SoilParams globalSoil;
   Options options;
   std::unordered_map<std::string, SoilParams> soils;
   std::vector<std::pair<std::string, std::string>> terrainSoilMap;  // pattern -> soil
@@ -180,9 +184,6 @@ struct TunedParams {
 
   // Transport
   gz::transport::Node node;
-  gz::transport::Node::Publisher resultsPub;
-  gz::transport::Node::Publisher intermediatePub;
-
 
 
   // World data
@@ -476,6 +477,7 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::initializeWheel(int whee
     return false;
   }
 
+  //da vedere !! 
   if (!options.passive_plugin)
   {
     gzwarn << "TERRAMECHANICS: Set wheel collision friction=0 in SDF" << std::endl;
