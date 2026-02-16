@@ -19,6 +19,8 @@
 #include <gz/sim/components/Name.hh>
 #include <gz/sim/components/ContactSensorData.hh>
 #include <gz/sim/Joint.hh>
+#include <gz/sim/components/RaycastData.hh>
+#include <gz/sim/components/Physics.hh>
 
 
 
@@ -78,6 +80,7 @@ struct TunedParams {
     double b0 = 0, b1 = 0;
     double d0 = 1, d1 = 0.5;
     double n0 = NAN, n1 = NAN, n2 = NAN;
+    double n_effective = 0;
 };
 
   struct WheelState {
@@ -124,6 +127,7 @@ struct TunedParams {
     std::string name;
     gz::sim::Entity linkEntity{gz::sim::kNullEntity};
     gz::sim::Entity steerEntity{gz::sim::kNullEntity};
+    gz::sim::Entity rayEntity{gz::sim::kNullEntity};
   
     std::string collision_name;
     std::string prev_contact_name = "";
@@ -131,8 +135,10 @@ struct TunedParams {
     double link_mass = 0.0;
     double f_signs[2] = {1.0, 1.0};    
 
-    WheelParams wheelParam;
-    SoilParams soilParam;
+    //WheelParams wheelParam;
+    const WheelParams* wheelParam = nullptr;
+    //SoilParams soilParam;
+    const SoilParams* soilParam = nullptr;
     TunedParams tunedParam;
     WheelState stateParam;
     TerramechanicsParams terraParam;
@@ -270,6 +276,22 @@ void TerramechanicsSystem::Configure(
         gzmsg << "apply_all_wheels_terramechanics_model plugin successfully loaded"<< std::endl;
     }
 
+    auto worldEntity = _ecm.EntityByComponents(gz::sim::components::World());
+    _ecm.CreateComponent(worldEntity, gz::sim::components::PhysicsCollisionDetector("bullet"));
+    for (int i = 0; i < dataPtr->num_wheels; i++) {
+        dataPtr->wheels[i].rayEntity = _ecm.CreateEntity();
+        _ecm.CreateComponent(dataPtr->wheels[i].rayEntity, gz::sim::components::RaycastData());
+        _ecm.CreateComponent(dataPtr->wheels[i].rayEntity, gz::sim::components::Pose());
+
+        // Set ray direction once — always straight down
+        auto rayComp = _ecm.Component<gz::sim::components::RaycastData>(dataPtr->wheels[i].rayEntity);
+        if (rayComp) {
+            gz::sim::components::RayInfo ray;
+            ray.start = gz::math::Vector3d::Zero;
+            ray.end = gz::math::Vector3d(0, 0, -100); //for infinite downward
+            rayComp->Data().rays.push_back(ray);
+        }
+    }
 
     bool all_wheels_read = true;
     for (int i=0; i < dataPtr-> num_wheels; i++)
@@ -586,7 +608,7 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::findSinkage(int wheel_id
     
       // find sinkage iteratively equalizing computed F_z with wheel load
     double h_min = 0;
-    double h_max = 1.5 * wheel.wheelParam.r_s;
+    double h_max = 1.5 * wheel.wheelParam->r_s;
     double max_err = wheel.forces.W * pow(10, -3);
     double F_z = 0;
     
@@ -628,7 +650,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeContactGeometry(i
     
     // unpack params
     double h_0 = wheel.terraParam.h_0;
-    double r_s = wheel.wheelParam.r_s;
+    double r_s = wheel.wheelParam->r_s;
     int rim_pts = this->rim_pts;
     double theta_f = acos(1 - h_0/r_s);
 
@@ -665,14 +687,14 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeStresses(int whee
     WheelData& wheel = wheels[wheel_idx];
   // unpack params
   int rim_pts = this->rim_pts;
-  double k = wheel.soilParam.k;
-  double c = wheel.soilParam.c;
-  double phi = wheel.soilParam.phi;
-  double K = wheel.soilParam.K;
-  double n = wheel.soilParam.n;
-  double r = wheel.wheelParam.r;
-  double r_s = wheel.wheelParam.r_s;
-  double mu = wheel.wheelParam.mu;
+  double k = wheel.soilParam->k;
+  double c = wheel.soilParam->c;
+  double phi = wheel.soilParam->phi;
+  double K = wheel.soilParam->K;
+  double n = wheel.tunedParam.n_effective;
+  double r = wheel.wheelParam->r;
+  double r_s = wheel.wheelParam->r_s;
+  double mu = wheel.wheelParam->mu;
   double d0 = wheel.tunedParam.d0;
   double d1 = wheel.tunedParam.d1;
   double v_y = wheel.stateParam.v_y;
@@ -775,16 +797,16 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeForces(int wheel_
   // unpack params
   int rim_pts = this -> rim_pts;
   std::string bulldozing_resistance = this -> options.bulldozing_resistance;
-  double X_c = wheel.soilParam.X_c;
-  double c = wheel.soilParam.c;
-  double rho = wheel.soilParam.rho;
-  double phi = wheel.soilParam.phi;
+  double X_c = wheel.soilParam->X_c;
+  double c = wheel.soilParam->c;
+  double rho = wheel.soilParam->rho;
+  double phi = wheel.soilParam->phi;
   double theta_f = wheel.terraParam.theta_f;
   double theta_r = wheel.terraParam.theta_r;
   double theta_m = wheel.terraParam.theta_m;
   double beta = wheel.stateParam.beta;
-  double r_s = wheel.wheelParam.r_s;
-  double b = wheel.wheelParam.b;
+  double r_s = wheel.wheelParam->r_s;
+  double b = wheel.wheelParam->b;
 
 
   double d_theta = (theta_f-theta_r) / (rim_pts - 1);
@@ -925,7 +947,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setWheelParams(int wheel
   WheelData& wheel = wheels[wheel_idx];
 
   // Copy from global config
-  wheel.wheelParam = globalWheelParams;
+  wheel.wheelParam = &globalWheelParams;
 }
 
 
@@ -941,9 +963,9 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setWheelStateParams(int 
   }
 
   // Change sign where necessary so that omega > 0 for forward movement
-  if (wheel.name.find("br") != std::string::npos || 
+  if (wheel.name.find("br") != std::string::npos ||
       wheel.name.find("fr") != std::string::npos)
-    wheel.stateParam.omega *= -1;  
+    wheel.stateParam.omega *= -1;
 
   // If omega < 0 (backward movement), change its sign and rotate contact frame so it's the same as moving forward in the reverse direction
   if (wheel.stateParam.omega < 0) {
@@ -967,20 +989,20 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setWheelStateParams(int 
 
   wheel.stateParam.beta = atan(wheel.stateParam.v_y / wheel.stateParam.v_x);
 
-  if (fabs(wheel.stateParam.omega * wheel.wheelParam.r_s) <= pow(10, -4) && 
+  if (fabs(wheel.stateParam.omega * wheel.wheelParam->r_s) <= pow(10, -4) && 
       fabs(wheel.stateParam.v_x) <= pow(10, -4)) {
       // Case 0/0
       wheel.stateParam.s = 0;
-  } else if (fabs(wheel.wheelParam.r_s * wheel.stateParam.omega) >= 
+  } else if (fabs(wheel.wheelParam->r_s * wheel.stateParam.omega) >= 
               fabs(wheel.stateParam.v_x)) {
       // Slip
       wheel.stateParam.s = 
-          (wheel.wheelParam.r_s * wheel.stateParam.omega - wheel.stateParam.v_x) / 
-          (wheel.wheelParam.r_s * wheel.stateParam.omega);
+          (wheel.wheelParam->r_s * wheel.stateParam.omega - wheel.stateParam.v_x) / 
+          (wheel.wheelParam->r_s * wheel.stateParam.omega);
   } else {
       // Skid
       wheel.stateParam.s = 
-          (wheel.wheelParam.r_s * wheel.stateParam.omega - wheel.stateParam.v_x) / 
+          (wheel.wheelParam->r_s * wheel.stateParam.omega - wheel.stateParam.v_x) / 
           (wheel.stateParam.v_x);
   }     
 
@@ -991,6 +1013,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setSoilParams(int wheel_
 {
   // Get terrain under the wheels
   std::string terrainName = getTerrainBelow(wheel_idx, _ecm);
+  gzmsg << terrainName << std::endl;
   
   // Lookup mapping
   std::string soilName = defaultSoil;
@@ -1004,24 +1027,20 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setSoilParams(int wheel_
   }
   
   // Get params
-  wheels[wheel_idx].soilParam = soils[soilName];
+  wheels[wheel_idx].soilParam = &soils[soilName];
 }
 
 
-std::string TerramechanicsSystem::TerramechanicsSystemPrivate::getTerrainBelow(int wheel_idx, gz::sim::EntityComponentManager &_ecm)
+std::string TerramechanicsSystem::TerramechanicsSystemPrivate::getTerrainBelow(
+    int wheel_idx, gz::sim::EntityComponentManager &_ecm)
 {
-  WheelData& wheel = wheels[wheel_idx];
-
-  auto contacts = _ecm.Component<gz::sim::components::ContactSensorData>(wheel.linkEntity);
-  if (contacts)
-  {
-    for (const auto& contact : contacts->Data().contact())
-    {
-      return contact.collision2().name();  // raw collision name
-    }
-  }
-  return "";  // empty = no contact, setSoilParams will use defaultSoil
+    auto rayComp = _ecm.Component<gz::sim::components::RaycastData>(wheels[wheel_idx].rayEntity);
+    if (rayComp && !rayComp->Data().results.empty() && 
+        rayComp->Data().results[0].fraction > 0)
+        return "terrain";
+    return "";
 }
+
 
 
 void TerramechanicsSystem::TerramechanicsSystemPrivate::setTunedParams(int wheel_idx)
@@ -1029,14 +1048,14 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setTunedParams(int wheel
     WheelData& wheel = wheels[wheel_idx];
 
     // Initialize tunedParam n-coefficients from soil YAML values
-    wheel.tunedParam.n0 = wheel.soilParam.n0;
-    wheel.tunedParam.n1 = wheel.soilParam.n1;
-    wheel.tunedParam.n2 = wheel.soilParam.n2;
+    wheel.tunedParam.n0 = wheel.soilParam->n0;
+    wheel.tunedParam.n1 = wheel.soilParam->n1;
+    wheel.tunedParam.n2 = wheel.soilParam->n2;
     
     double beta = fabs(wheel.stateParam.beta);
 
 
-    if (wheel.wheelParam.type == "smooth" && wheel.soilParam.name == "Soil_Direct_90_sand") {
+    if (wheel.wheelParam->type == "smooth" && wheel.soilParam->name == "Soil_Direct_90_sand") {
     // coeff interpolated from Pavlov data (wheels won't be the same), not used in simplified geometry
         wheel.tunedParam.a0 = -0.0539*pow(beta, 3) - 0.0227*pow(beta, 2) + 0.6294*beta + 0.1674;
         wheel.tunedParam.a1 = 0.0156*pow(beta, 3) + 0.3414*pow(beta, 2) - 1.0039*beta + 0.7632;
@@ -1046,7 +1065,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setTunedParams(int wheel
         wheel.tunedParam.n0 = 1.46;
         wheel.tunedParam.n1 = 0.01;
         wheel.tunedParam.n2 = 0.55;
-    } else if (wheel.wheelParam.type == "grousers" && wheel.soilParam.name == "Soil_Direct_90_sand") {
+    } else if (wheel.wheelParam->type == "grousers" && wheel.soilParam->name == "Soil_Direct_90_sand") {
         wheel.tunedParam.a0 = 0.7450*pow(beta, 4) - 2.4800*pow(beta, 3) + 2.6033*pow(beta, 2) - 0.4332*beta + 0.2716;
         wheel.tunedParam.a1 = -0.6876*pow(beta, 4) + 2.3687*pow(beta, 3) - 2.5096*pow(beta, 2) + 0.3618*beta + 0.6761;
         wheel.tunedParam.b0 = -0.3198*pow(beta, 3) + 0.1680*pow(beta, 2) + 0.3219*beta - 0.6372;
@@ -1061,13 +1080,16 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setTunedParams(int wheel
     wheel.tunedParam.d1 = 0.5;
     
       // case n is already set for the soil
-    if (std::isnan(wheel.soilParam.n0)) return;
-    
-    if (wheel.stateParam.s >= 0) {
-        wheel.soilParam.n = wheel.tunedParam.n0 + wheel.tunedParam.n1 * wheel.stateParam.s;
-    } else {
-        wheel.soilParam.n = wheel.tunedParam.n0 - wheel.tunedParam.n2 * wheel.stateParam.s;
+    if (std::isnan(wheel.soilParam->n0)) {
+        wheel.tunedParam.n_effective = wheel.soilParam->n;
+        return;
     }
+    if (wheel.stateParam.s >= 0) {
+        wheel.tunedParam.n_effective = wheel.tunedParam.n0 + wheel.tunedParam.n1 * wheel.stateParam.s;
+    } else {
+        wheel.tunedParam.n_effective = wheel.tunedParam.n0 - wheel.tunedParam.n2 * wheel.stateParam.s;
+    }
+
 
 }
 
@@ -1159,7 +1181,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
     //     if (update_step_counter % (options.skip_update_steps + 1) != 0) {
     //         // On skipped steps, just apply previous forces to maintain behavior
     //         for (int i = 0; i < num_wheels; i++) {
-    //             if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam.r_s) >= 0.02) {
+    //             if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam->r_s) >= 0.02) {
     //                 applyForce(i);
     //             }
     //         }
@@ -1169,9 +1191,16 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
 
     // 1. First collect all wheel states (serial)
 
+    
+
     for (int i = 0; i < num_wheels; i++)
     {
       auto steerPose = _ecm.Component<gz::sim::components::WorldPose>(wheels[i].steerEntity);
+      auto wheelPose = _ecm.Component<gz::sim::components::WorldPose>(wheels[i].linkEntity);
+      if (wheelPose)
+          _ecm.SetComponentData<gz::sim::components::Pose>(
+              wheels[i].rayEntity, gz::math::Pose3d(wheelPose->Data().Pos(), gz::math::Quaterniond::Identity));
+
       if (steerPose)
         wheels[i].contact_frame_rot = steerPose->Data().Rot();
 
@@ -1196,7 +1225,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
     #pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < num_wheels; i++) {
         // Skip static wheels
-        if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam.r_s) < 0.02) {
+        if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam->r_s) < 0.02) {
             continue;
         }
 
@@ -1212,7 +1241,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
 
     // 3. Apply forces (serial - safe)
     for (int i = 0; i < num_wheels; i++) {
-        if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam.r_s) < 0.02) {
+        if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam->r_s) < 0.02) {
             // Only zero velocities when wheel is in contact with terrain,
             // otherwise gravity free-fall is blocked
             if (!this->options.passive_plugin && !getTerrainBelow(i, _ecm).empty())
