@@ -24,9 +24,9 @@
 
 
 
-//Queste variabili sono dichiarate nel codice ma non vengono mai utilizzate: counter_ non viene mai letto né scritto, collision_name non viene mai impostato
- //  né letto, prev_contact_name viene solo inizializzato ma mai usato, e WheelState::v viene calcolato alla riga 960 ma il suo valore non viene mai letto da 
- // nessuna parte.  
+// Queste variabili sono dichiarate nel codice ma non vengono mai utilizzate: counter_ non viene mai letto né scritto, collision_name non viene mai impostato
+// né letto, prev_contact_name viene solo inizializzato ma mai usato, e WheelState::v viene calcolato alla riga 960 ma il suo valore non viene mai letto da 
+// nessuna parte.  
 
 
 using namespace gz_terramechanics;
@@ -128,7 +128,8 @@ struct TunedParams {
     gz::sim::Entity linkEntity{gz::sim::kNullEntity};
     gz::sim::Entity steerEntity{gz::sim::kNullEntity};
     gz::sim::Entity rayEntity{gz::sim::kNullEntity};
-  
+    gz::sim::Entity contactSensorEntity{gz::sim::kNullEntity};
+
     std::string collision_name;
     std::string prev_contact_name = "";
     gz::math::Quaterniond contact_frame_rot;
@@ -143,6 +144,11 @@ struct TunedParams {
     WheelState stateParam;
     TerramechanicsParams terraParam;
     Forces forces;
+
+    gz::math::Vector3d friction_force;
+    int iters_without_contact = 0;
+    bool in_contact = false;
+    std::vector<str::string> collision_names;
 
     gz::transport::Node::Publisher forcesPub;
     gz::transport::Node::Publisher statePub;
@@ -172,7 +178,8 @@ struct TunedParams {
   int rim_pts = 100;
 
   std::array<std::string, num_wheels> wheel_names;
-  std::array<std::string, num_wheels> joint_names;  
+  std::array<std::string, num_wheels> joint_names;
+  std::array<std::string, num_wheels> contact_sensor_names;
 
   std::array<WheelData, num_wheels> wheels;
 
@@ -180,6 +187,7 @@ struct TunedParams {
   Options options;
   std::unordered_map<std::string, SoilParams> soils;
   std::vector<std::pair<std::string, std::string>> terrainSoilMap;  // pattern -> soil
+  std::unordered_map<std::string, std::string> terrainCollisionToLinkMap;
   std::string defaultSoil;
 
 
@@ -215,8 +223,9 @@ struct TunedParams {
   void setTunedParams(int wheel_idx);
   void applyForce(int wheel_idx, gz::sim::EntityComponentManager &_ecm);
   void publishResults(int wheel_idx);
-  void onUpdateFull(gz::sim::EntityComponentManager &_ecm);  
+  void onUpdateFull(gz::sim::EntityComponentManager &_ecm);
   void onUpdateCompact(gz::sim::EntityComponentManager &_ecm);
+  void getContactsData(gz::sim::EntityComponentManager &_ecm);
 
 };
 
@@ -329,6 +338,16 @@ void TerramechanicsSystem::PreUpdate(
     dataPtr->onUpdateFull(_ecm);
 }
 
+void TerramechanicsSystem::PostUpdate(
+    const gz::sim::UpdateInfo &_info,
+    gz::sim::EntityComponentManager &_ecm)
+{
+  // NOTE: Contact data are read (and corrected) with one step delay, can't read them otherwise.
+  //   This might be moved in preupdate or update, contact data will be delayed anyway but maybe not 
+  //   the steer frame since we also use that one to create the contact frame
+  dataPtr->getContactsData(_ecm);
+}
+
 void TerramechanicsSystem::Reset(
     const gz::sim::UpdateInfo &_info,
     gz::sim::EntityComponentManager &_ecm)
@@ -398,6 +417,15 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::initializePluginParam(co
       gzerr << "drive_joints not found or invalid in wheel_params.yaml (need " << num_wheels << " entries)" << std::endl;
     }
 
+    if (wheelConfig["contact_sensors"] && wheelConfig["contact_sensors"].size() == num_wheels) {
+      for (int i = 0; i < num_wheels; ++i) {
+        contact_sensor_names[i] = wheelConfig["contact_sensors"][i].as<std::string>();
+      }
+      gzmsg << "Loaded contact sensors names from config" << std::endl;
+    } else {
+      gzerr << "contact_sensors not found or invalid in wheel_params.yaml (need " << num_wheels << " entries)" << std::endl;
+    }
+
     // Load soil parameters
     YAML::Node soilConfig = YAML::LoadFile(configPath + "/soil_params.yaml");
     for (const auto& soilNode : soilConfig) {
@@ -430,11 +458,29 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::initializePluginParam(co
     // Load terrain mapping
     YAML::Node mapConfig = YAML::LoadFile(configPath + "/terrain_mapping.yaml");
     this->defaultSoil = mapConfig["default_soil"].as<std::string>("Sand_marsSim");
-    for (const auto& entry : mapConfig["terrain_mapping"]) {
-        terrainSoilMap.emplace_back(
-            entry["pattern"].as<std::string>(),
-            entry["soil"].as<std::string>()
-        );
+    for (const auto& entry : mapConfig["terrain_mapping"])
+    {
+      std::string terrainName = entry["pattern"].as<std::string>();
+
+      gz::sim::Entity terrainEntity =_ecm.EntityByName(terrainName).value_or(gz::sim::kNullEntity);
+      if (terrainEntity == gz::sim::kNullEntity)
+          {
+            gzwarn << "No link found for terrain " << terrainName << std::endl;
+            continue;
+          }
+
+      auto collisions = terrainEntity.Collisions(_ecm);
+      for (auto coll : collisions)
+      {
+          auto nameComp = _ecm.Component<gz::sim::components::Name>(coll);
+          if (!nameComp) continue;
+          terrainCollisionToLinkMap[nameComp->Data()] = terrainName;
+      }
+
+      terrainSoilMap.emplace_back(
+          terrainName,
+          entry["soil"].as<std::string>()
+      );
     }
   }
   catch(const std::exception &e)
@@ -497,6 +543,22 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::initializeWheel(int whee
   {
     gzerr << "Steer link [" << parentLinkName.value() << "] not found" << std::endl;
     return false;
+  }
+
+  // Get contact sensor entity by name
+  wheel.contactSensorEntity = wheel.linkEntity.SensorByName(_ecm, contact_sensor_names[wheel_idx]);
+  if (wheel.contactSensorEntity == gz::sim::kNullEntity)
+  {
+    gzerr << "Contact Sensor not found: " << contact_sensor_names[wheel_idx] << std::endl;
+    return false;
+  }
+
+  // Get wheel collisions
+  for (auto coll : wheel.linkEntity.Collisions(_ecm);)
+  {
+      auto nameComp = _ecm.Component<gz::sim::components::Name>(coll);
+      if (!nameComp) continue;
+      wheel.collision_names.push_back(nameComp->Data());
   }
 
   //da vedere !! 
@@ -1012,9 +1074,9 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setWheelStateParams(int 
 void TerramechanicsSystem::TerramechanicsSystemPrivate::setSoilParams(int wheel_idx,  gz::sim::EntityComponentManager &_ecm)
 {
   // Get terrain under the wheels
-  std::string terrainName = getTerrainBelow(wheel_idx, _ecm);
+  std::string terrainName = getTerrainBelow(wheel_idx, _ecm); // TODO update
   gzmsg << terrainName << std::endl;
-  
+
   // Lookup mapping
   std::string soilName = defaultSoil;
   for (const auto& [pattern, soil] : terrainSoilMap)
@@ -1025,7 +1087,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setSoilParams(int wheel_
       break;
     }
   }
-  
+
   // Get params
   wheels[wheel_idx].soilParam = &soils[soilName];
 }
@@ -1190,9 +1252,6 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
     // }
 
     // 1. First collect all wheel states (serial)
-
-    
-
     for (int i = 0; i < num_wheels; i++)
     {
       auto steerPose = _ecm.Component<gz::sim::components::WorldPose>(wheels[i].steerEntity);
@@ -1263,11 +1322,115 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
     }
 }
 
+
+void TerramechanicsSystem::TerramechanicsSystemPrivate::getContactsData(gz::sim::EntityComponentManager &_ecm)
+{
+  for (int ww = 0; ww <num_wheels; ww++)
+  {
+    WheelData& wheel = wheels[ww];
+    wheel.in_contact = false;
+    wheel.friction_force = gz::math::Vector3d(0,0,0);
+
+    auto comp = _ecm.Component<gz::sim::components::ContactSensorData>(wheel.contactSensorEntity);
+    if (comp)
+    {
+      gz::math::Vector3d normal, force;
+
+      // Loop contact pairs
+      for (int c = 0; c < comp->Data().contact_size(); c++)
+      {
+        auto contact = comp->Data().contact(c);
+
+        bool is_body_1;
+        std::string coll1 = contact.collision1().name();
+        std::string coll2 = contact.collision2().name();
+
+        if ((std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll1) != wheel.collision_names.end())
+            && (auto it = terrainCollisionToLinkMap.find(coll2); it != terrainCollisionToLinkMap.end()))
+        {
+          // Collision1 is the wheel and collision2 is a terrain
+          is_body_1 = true;
+          terrain_name = it->second;
+        } else if ((std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll2) != wheel.collision_names.end())
+            && (auto it = terrainCollisionToLinkMap.find(coll1); it != terrainCollisionToLinkMap.end()))
+        {
+          // Collision2 is the wheel and collision1 is a terrain
+          is_body_1 = false;
+          terrain_name = it->second;
+        } else {
+          // DEBUG if condition
+          if (!(std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll1) != wheel.collision_names.end())
+              && !(std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll2) != wheel.collision_names.end()))
+            gzerr << "Wheel collision is not one of the collisions? Something is wrong..." << std::endl;
+
+          // Collision with some other non-terrain object. Neglected for this plugin
+          // Maybe normal force should be included anyway within wheel load(?) maybe not. Friction we keep
+          continue;
+        }
+
+        wheel.in_contact = true;
+        wheel.iters_without_contact = 0;
+
+        // Loop contact points
+        for (int ii = 0; ii < contact.position_size(); ii++)
+        {
+          if (is_body_1)
+          {
+            // normal points from collision1 to collision2, change sign
+            normal -= contact.normal(ii);
+            force += contact.wrench(ii).body_1_wrench().force();
+          }
+          else
+          {
+            normal += contact.normal(ii);
+            force += contact.wrench(ii).body_2_wrench().force();
+          }
+        }
+      }
+
+      // Find normal and tangential force components
+      normal.normalize();
+
+      // set wheel load
+      wheel.forces.W = force.Dot(normal);
+
+      wheel.friction_force = force - normal * wheel.forces.W;
+
+      auto steerPose = _ecm.Component<gz::sim::components::WorldPose>(wheel.steerEntity);
+      if (steerPose)
+      {
+        gz::math::Vector3d steer_x = steerPose->Data().Rot().XAxis();
+
+        gz::math::Vector3d contact_x = (steer_x - steer_x.Dot(normal) * normal).normalize();
+        gz::math::Vector3d contact_y = normal.Cross(contact_x).normalize();
+
+        gz::math::Matrix3d contact_frame;
+        wheel.contact_frame_rot.SetFromMatrix(contact_frame.Axes(contact_x, contact_y, normal));
+
+        if (wheel.name.find("br") != std::string::npos ||
+            wheel.name.find("fr") != std::string::npos)
+        {
+          wheel.contact_frame_rot =
+              wheel.contact_frame_rot * gz::math::Quaterniond(0, 0, M_PI);
+        }
+        wheel.contact_frame_rot.Normalize();
+      }
+
+    }
+    else if(wheel.iters_without_contact < 3){
+      wheel.in_contact = true;
+      wheel.iters_without_contact++;
+    }
+  }
+}
+
+
 GZ_ADD_PLUGIN(
     gz_terramechanics::TerramechanicsSystem,
     gz::sim::System,
     gz::sim::ISystemConfigure,
     gz::sim::ISystemPreUpdate,
+    gz::sim::ISystemPostUpdate,
     gz::sim::ISystemReset)
 
 
