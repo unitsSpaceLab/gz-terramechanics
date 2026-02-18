@@ -130,11 +130,11 @@ struct TunedParams {
     gz::sim::Entity rayEntity{gz::sim::kNullEntity};
     gz::sim::Entity contactSensorEntity{gz::sim::kNullEntity};
 
-    std::string collision_name;
-    std::string prev_contact_name = "";
+    // std::string collision_name;
+    // std::string prev_contact_name = "";
     gz::math::Quaterniond contact_frame_rot;
-    double link_mass = 0.0;
-    double f_signs[2] = {1.0, 1.0};    
+    // double link_mass = 0.0;
+    // double f_signs[2] = {1.0, 1.0};    
 
     //WheelParams wheelParam;
     const WheelParams* wheelParam = nullptr;
@@ -145,10 +145,11 @@ struct TunedParams {
     TerramechanicsParams terraParam;
     Forces forces;
 
-    gz::math::Vector3d friction_force;
+    gz::math::Vector3d friction_compensation;
     int iters_without_contact = 0;
     bool in_contact = false;
-    std::vector<str::string> collision_names;
+    std::vector<std::string> collision_names;
+    std::string terrain_name;
 
     gz::transport::Node::Publisher forcesPub;
     gz::transport::Node::Publisher statePub;
@@ -187,7 +188,7 @@ struct TunedParams {
   Options options;
   std::unordered_map<std::string, SoilParams> soils;
   std::vector<std::pair<std::string, std::string>> terrainSoilMap;  // pattern -> soil
-  std::unordered_map<std::string, std::string> terrainCollisionToLinkMap;
+  std::unordered_map<std::string, std::string> collisionsToTerrainMap;
   std::string defaultSoil;
 
 
@@ -200,14 +201,14 @@ struct TunedParams {
   gz::transport::Node node;
 
 
-  // World data
+  /* // World data
   double world_gravity = 9.81;
   double rover_dimensions[2] = {0.0, 0.0};
-  std::vector<std::vector<double>> other_masses;
+  std::vector<std::vector<double>> other_masses; */
 
 
   // Helper methods
-  void initializePluginParam(const std::shared_ptr<const sdf::Element> &_sdf);
+  void initializePluginParam(const std::shared_ptr<const sdf::Element> &_sdf, gz::sim::EntityComponentManager &_ecm);
   void initializeTransport();
   bool initializeWheel(int wheel_idx, gz::sim::EntityComponentManager &_ecm);
   void initializeWheels(gz::sim::EntityComponentManager &_ecm);
@@ -215,7 +216,7 @@ struct TunedParams {
   void computeContactGeometry(int wheel_idx);
   void computeStresses(int wheel_idx);
   void computeForces(int wheel_idx, double* F_z_out);
-  void computeWheelLoad(gz::sim::EntityComponentManager &_ecm, int wheel_idx);
+  // void computeWheelLoad(gz::sim::EntityComponentManager &_ecm, int wheel_idx);
   void setWheelParams(int wheel_idx);
   void setWheelStateParams(int wheel_idx, gz::sim::EntityComponentManager &_ecm);
   void setSoilParams(int wheel_idx,  gz::sim::EntityComponentManager &_ecm);
@@ -225,7 +226,7 @@ struct TunedParams {
   void publishResults(int wheel_idx);
   void onUpdateFull(gz::sim::EntityComponentManager &_ecm);
   void onUpdateCompact(gz::sim::EntityComponentManager &_ecm);
-  void getContactsData(gz::sim::EntityComponentManager &_ecm);
+  void getContactData(int wheel_idx, gz::sim::EntityComponentManager &_ecm);
 
 };
 
@@ -245,7 +246,6 @@ void TerramechanicsSystem::Configure(
     gz::sim::EntityComponentManager &_ecm,
     gz::sim::EventManager &_eventMgr)
 {
-
     // Set OpenMP threads to match number of wheels
     omp_set_num_threads(dataPtr->num_wheels);
 
@@ -258,7 +258,7 @@ void TerramechanicsSystem::Configure(
             num_threads = omp_get_num_threads();
             gzmsg << "OpenMP is enabled with " << num_threads << " threads" << std::endl;
         }
-    }    
+    }
 
     // Load function - called when plugin is loaded
     dataPtr->plugin_state_ = TerramechanicsSystemPrivate::PluginState::LOADING;
@@ -269,7 +269,7 @@ void TerramechanicsSystem::Configure(
     dataPtr->model_ = gz::sim::Model(_entity);
 
     // Initialize
-    dataPtr->initializePluginParam(_sdf);
+    dataPtr->initializePluginParam(_sdf, _ecm);
     dataPtr->initializeWheels(_ecm);
 
     if (dataPtr->publish_results) {
@@ -338,20 +338,22 @@ void TerramechanicsSystem::PreUpdate(
     dataPtr->onUpdateFull(_ecm);
 }
 
-void TerramechanicsSystem::PostUpdate(
+/* void TerramechanicsSystem::PostUpdate(
     const gz::sim::UpdateInfo &_info,
     gz::sim::EntityComponentManager &_ecm)
 {
   // NOTE: Contact data are read (and corrected) with one step delay, can't read them otherwise.
-  //   This might be moved in preupdate or update, contact data will be delayed anyway but maybe not 
+  //   This might be moved in preupdate, contact data will be delayed anyway but maybe not 
   //   the steer frame since we also use that one to create the contact frame
-  dataPtr->getContactsData(_ecm);
-}
+  for (int i = 0; i < num_wheels; i++)
+  {
+    dataPtr->getContactData(i, _ecm);
+  }
+} */
 
 void TerramechanicsSystem::Reset(
     const gz::sim::UpdateInfo &_info,
     gz::sim::EntityComponentManager &_ecm)
-
 {
   for (int i=0; i < dataPtr->num_wheels; i++)
   {
@@ -370,13 +372,14 @@ void TerramechanicsSystem::Reset(
 }
 
 
-void TerramechanicsSystem::TerramechanicsSystemPrivate::initializePluginParam(const std::shared_ptr<const sdf::Element> &_sdf)
+void TerramechanicsSystem::TerramechanicsSystemPrivate::initializePluginParam(
+  const std::shared_ptr<const sdf::Element> &_sdf,
+  gz::sim::EntityComponentManager &_ecm)
 {
-
   // Get config path
   std::string configPath = _sdf->Get<std::string>("config_path", "config").first;
 
-  try 
+  try
     {
     // Load options
     YAML::Node optConfig = YAML::LoadFile(configPath + "/plugin_options.yaml");
@@ -462,19 +465,25 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::initializePluginParam(co
     {
       std::string terrainName = entry["pattern"].as<std::string>();
 
-      gz::sim::Entity terrainEntity =_ecm.EntityByName(terrainName).value_or(gz::sim::kNullEntity);
-      if (terrainEntity == gz::sim::kNullEntity)
-          {
-            gzwarn << "No link found for terrain " << terrainName << std::endl;
-            continue;
-          }
-
-      auto collisions = terrainEntity.Collisions(_ecm);
-      for (auto coll : collisions)
+      gz::sim::Entity terrainEntity = _ecm.EntityByName(terrainName).value_or(gz::sim::kNullEntity);
+      gz::sim::Model terrainModel(terrainEntity);
+      if (!terrainModel.Valid(_ecm))
       {
-          auto nameComp = _ecm.Component<gz::sim::components::Name>(coll);
-          if (!nameComp) continue;
-          terrainCollisionToLinkMap[nameComp->Data()] = terrainName;
+        gzwarn << "No model found for terrain " << terrainName << std::endl;
+        continue;
+      }
+
+      for (auto linkEntity : terrainModel.Links(_ecm))
+      {
+          gz::sim::Link link(linkEntity);
+          if (!link.Valid(_ecm)) continue;
+
+          for (auto coll : link.Collisions(_ecm))
+          {
+              auto nameComp = _ecm.Component<gz::sim::components::Name>(coll);
+              if (!nameComp) continue;
+              collisionsToTerrainMap[nameComp->Data()] = terrainName;
+          }
       }
 
       terrainSoilMap.emplace_back(
@@ -546,7 +555,9 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::initializeWheel(int whee
   }
 
   // Get contact sensor entity by name
-  wheel.contactSensorEntity = wheel.linkEntity.SensorByName(_ecm, contact_sensor_names[wheel_idx]);
+  gz::sim::Link wheelLink(wheel.linkEntity);
+
+  wheel.contactSensorEntity = wheelLink.SensorByName(_ecm, contact_sensor_names[wheel_idx]);
   if (wheel.contactSensorEntity == gz::sim::kNullEntity)
   {
     gzerr << "Contact Sensor not found: " << contact_sensor_names[wheel_idx] << std::endl;
@@ -554,12 +565,18 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::initializeWheel(int whee
   }
 
   // Get wheel collisions
-  for (auto coll : wheel.linkEntity.Collisions(_ecm);)
+  for (auto coll : wheelLink.Collisions(_ecm))
   {
       auto nameComp = _ecm.Component<gz::sim::components::Name>(coll);
       if (!nameComp) continue;
       wheel.collision_names.push_back(nameComp->Data());
   }
+
+  // Enable velocity checks for wheel and steer links
+  wheelLink.EnableVelocityChecks(_ecm, true);
+
+  gz::sim::Link steerLink(wheel.steerEntity);
+  steerLink.EnableVelocityChecks(_ecm, true);
 
   //da vedere !! 
   if (!options.passive_plugin)
@@ -571,18 +588,12 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::initializeWheel(int whee
   // Set wheel parameters
   setWheelParams(wheel_idx);
 
+  /* // Wheel load computation setup
   // Get gravity
   auto worldEntity = _ecm.EntityByComponents(gz::sim::components::World());
   auto gravityComp = _ecm.Component<gz::sim::components::Gravity>(worldEntity);
   if (gravityComp)
     world_gravity = std::abs(gravityComp->Data().Z());
-
-  // Enable velocity checks for wheel and steer links
-  gz::sim::Link wheelLink(wheel.linkEntity);
-  wheelLink.EnableVelocityChecks(_ecm, true);
-
-  gz::sim::Link steerLink(wheel.steerEntity);
-  steerLink.EnableVelocityChecks(_ecm, true);
 
   // Request WorldPose component for the model (needed for computeWheelLoad)
   if (wheel_idx == 0 && !_ecm.Component<gz::sim::components::WorldPose>(modelEntity_)) {
@@ -646,7 +657,7 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::initializeWheel(int whee
     wheel.f_signs[0] = 1; wheel.f_signs[1] = 1;
   } else {
     gzerr << "unrecognized wheel name: " << wheel.name << std::endl;
-  }
+  } */
 
   return true;
 }
@@ -667,27 +678,27 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::initializeTransport()
 bool TerramechanicsSystem::TerramechanicsSystemPrivate::findSinkage(int wheel_idx)
 {
     WheelData& wheel = wheels[wheel_idx];
-    
-      // find sinkage iteratively equalizing computed F_z with wheel load
+
+    // find sinkage iteratively equalizing computed F_z with wheel load
     double h_min = 0;
     double h_max = 1.5 * wheel.wheelParam->r_s;
     double max_err = wheel.forces.W * pow(10, -3);
     double F_z = 0;
-    
+
     // binary search algorithm
     while (fabs(F_z - wheel.forces.W) > fabs(max_err)) {
         wheel.terraParam.h_0 = (h_max + h_min) / 2;
-        
+
         computeContactGeometry(wheel_idx);
         computeStresses(wheel_idx);
         computeForces(wheel_idx, &F_z);
-        
+
         if (F_z < wheel.forces.W) {
             h_min = wheel.terraParam.h_0;
         } else {
             h_max = wheel.terraParam.h_0;
         }
-        
+
         if ((h_max - h_min) < pow(10, -6)) {
             gzmsg << "Sinkage not found for wheel [" << wheel.name << 
                             "]: expected Fz = " << wheel.forces.W << 
@@ -696,27 +707,27 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::findSinkage(int wheel_id
             return false;
         }
     }
-    
+
     if (this->debug) {
         gzmsg << "DB [" << wheel.name << "]: Sinkage found: " << 
                         wheel.terraParam.h_0 << std::endl;
     }
-    
+
     return true;
 }
 
 
 void TerramechanicsSystem::TerramechanicsSystemPrivate::computeContactGeometry(int wheel_idx)
 {
-    WheelData& wheel = wheels[wheel_idx];
-    
-    // unpack params
-    double h_0 = wheel.terraParam.h_0;
-    double r_s = wheel.wheelParam->r_s;
-    int rim_pts = this->rim_pts;
-    double theta_f = acos(1 - h_0/r_s);
+  WheelData& wheel = wheels[wheel_idx];
 
-/*   // complex geometry
+  // unpack params
+  double h_0 = wheel.terraParam.h_0;
+  double r_s = wheel.wheelParam->r_s;
+  // int rim_pts = rim_pts;
+  double theta_f = acos(1 - h_0/r_s);
+
+  /* // complex geometry
   // for s>1, theta_m>theta_f breaks things
   if (s >= 0)
   {
@@ -728,27 +739,27 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeContactGeometry(i
   } */
 
   // simplified geometry
-    double theta_r = 0;
-    double theta_m = (theta_f + theta_r) / 2;
-    
-    double d_theta = (theta_f - theta_r) / (rim_pts - 1);
-    for (int i = 0; i < rim_pts; i++) {
-        wheel.terraParam.theta[i] = theta_r + i * d_theta;
-        wheel.terraParam.h[i] = r_s * (cos(wheel.terraParam.theta[i]) - cos(theta_f));
-    }
-    
-      // update params
-    wheel.terraParam.theta_f = theta_f;
-    wheel.terraParam.theta_r = theta_r;
-    wheel.terraParam.theta_m = theta_m;
+  double theta_r = 0;
+  double theta_m = (theta_f + theta_r) / 2;
+
+  double d_theta = (theta_f - theta_r) / (rim_pts - 1);
+  for (int i = 0; i < rim_pts; i++) {
+      wheel.terraParam.theta[i] = theta_r + i * d_theta;
+      wheel.terraParam.h[i] = r_s * (cos(wheel.terraParam.theta[i]) - cos(theta_f));
+  }
+
+  // update params
+  wheel.terraParam.theta_f = theta_f;
+  wheel.terraParam.theta_r = theta_r;
+  wheel.terraParam.theta_m = theta_m;
 }
 
 
 void TerramechanicsSystem::TerramechanicsSystemPrivate::computeStresses(int wheel_idx)
 {
-    WheelData& wheel = wheels[wheel_idx];
+  WheelData& wheel = wheels[wheel_idx];
   // unpack params
-  int rim_pts = this->rim_pts;
+  // int rim_pts = this->rim_pts;
   double k = wheel.soilParam->k;
   double c = wheel.soilParam->c;
   double phi = wheel.soilParam->phi;
@@ -770,8 +781,9 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeStresses(int whee
   wheel.terraParam.theta_0 = theta_0;
 
   std::ostringstream out_info; out_info << "DB [" << wheel.name << "]:";
-  for (size_t i = 0; i < rim_pts; i++) {
-      double theta_i = wheel.terraParam.theta[i];
+  for (size_t i = 0; i < rim_pts; i++)
+  {
+    double theta_i = wheel.terraParam.theta[i];
     // normal stress
     if (theta_i >= theta_m)
     {wheel.terraParam.theta_e[i] = theta_i;}
@@ -825,10 +837,10 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeStresses(int whee
                                         (1 - exp(-wheel.terraParam.j[i] / K));
         double denominator = sqrt(pow(wheel.terraParam.v_jt[i], 2) + 
                                   pow(wheel.terraParam.v_jl[i], 2));
-                                  
+
     wheel.terraParam.tau_t[i] = wheel.terraParam.tau[i] * 
                                           wheel.terraParam.v_jt[i] / denominator;
-                                          
+
     wheel.terraParam.tau_l[i] = wheel.terraParam.tau[i] * 
                                           wheel.terraParam.v_jl[i] / denominator;
 
@@ -891,11 +903,11 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeForces(int wheel_
   if (bulldozing_resistance == "Ishigami"){
     double D1 = 1/tan(X_c) + tan(X_c + phi);
     double D2 = 1/tan(X_c) + pow((1/tan(X_c)), 2) / (1/tan(phi));
-        
+
     for (size_t i = 1; i < rim_pts; i++) {
         double hh = r_s * (cos(wheel.terraParam.theta[i]) - cos(theta_f));
         wheel.forces.R_b[i] = D1 * (c * hh + 0.5 * D2 * rho * pow(hh, 2));
-        
+
         // negative sign so that F_y has opposite direction to wheel lateral velocity
         F_y -= d_theta * (r_s * b * wheel.terraParam.tau_l[i] + 
                         wheel.forces.R_b[i] * sin(beta) * 
@@ -907,13 +919,13 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeForces(int wheel_
                                   sin(wheel.terraParam.theta[i]));
                     M_y -= pow(r_s, 2) * b * d_theta * wheel.terraParam.tau_t[i];
     }   
- 
+
   } else if (bulldozing_resistance == "Pavlov"){
       for (size_t i = 1; i < rim_pts; i++) {
           double h_b = r_s * ((sin(wheel.terraParam.theta[i]) - sin(theta_r)) * 
                             (cos(theta_r) - cos(theta_f)) / (sin(theta_f) - sin(theta_r)) - 
                             (cos(theta_r) - cos(wheel.terraParam.theta[i])));
-                            
+
           wheel.forces.R_b[i] = rho/2 * pow(h_b, 2) * pow((1/tan(X_c)), 2) * 
                               (1 + 0.5 / tan(X_c) * tan(phi)) + 
                               2 * h_b * c / tan(X_c);
@@ -922,12 +934,12 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeForces(int wheel_
       F_y -= r_s * d_theta * (b * wheel.terraParam.tau_l[i] + 
                               wheel.forces.R_b[i] * sin(beta) * 
                               cos(wheel.terraParam.theta[i]));
-      
+
       F_x += r_s * b * d_theta * (wheel.terraParam.tau_t[i] * 
                                 cos(wheel.terraParam.theta[i]) - 
                                 wheel.terraParam.sigma[i] * 
                                 sin(wheel.terraParam.theta[i]));
-      
+
       M_y -= pow(r_s, 2) * b * d_theta * wheel.terraParam.tau_t[i];
     }
   } else{
@@ -961,7 +973,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeForces(int wheel_
 }
 
 
-void TerramechanicsSystem::TerramechanicsSystemPrivate::computeWheelLoad(gz::sim::EntityComponentManager &_ecm, int wheel_idx)
+/* void TerramechanicsSystem::TerramechanicsSystemPrivate::computeWheelLoad(gz::sim::EntityComponentManager &_ecm, int wheel_idx)
 {
     WheelData& wheel = wheels[wheel_idx];
   // compute static load on the wheel and gravity component tangential to the ground according
@@ -1001,7 +1013,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::computeWheelLoad(gz::sim
           << wheel_load_contact.Z() << std::endl;
   }
   wheel.forces.W = fabs(wheel_load_contact.Z());
-}
+} */
 
 
 void TerramechanicsSystem::TerramechanicsSystemPrivate::setWheelParams(int wheel_idx)
@@ -1018,7 +1030,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setWheelStateParams(int 
   WheelData& wheel = wheels[wheel_idx];
 
   // Wheel angular drive velocity
-  //auto angularVelComp = _ecm.Component<gz::sim::components::AngularVelocity>(wheel.linkEntity);
+  // auto angularVelComp = _ecm.Component<gz::sim::components::AngularVelocity>(wheel.linkEntity);
   auto angularVelComp = _ecm.Component<gz::sim::components::AngularVelocity>(wheel.linkEntity);
   if(angularVelComp) {
       wheel.stateParam.omega = angularVelComp->Data().Y();
@@ -1096,11 +1108,13 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setSoilParams(int wheel_
 std::string TerramechanicsSystem::TerramechanicsSystemPrivate::getTerrainBelow(
     int wheel_idx, gz::sim::EntityComponentManager &_ecm)
 {
-    auto rayComp = _ecm.Component<gz::sim::components::RaycastData>(wheels[wheel_idx].rayEntity);
+    /* auto rayComp = _ecm.Component<gz::sim::components::RaycastData>(wheels[wheel_idx].rayEntity);
     if (rayComp && !rayComp->Data().results.empty() && 
         rayComp->Data().results[0].fraction > 0)
         return "terrain";
-    return "";
+    return ""; */
+
+    return wheels[wheel_idx].terrain_name;
 }
 
 
@@ -1151,40 +1165,38 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setTunedParams(int wheel
     } else {
         wheel.tunedParam.n_effective = wheel.tunedParam.n0 - wheel.tunedParam.n2 * wheel.stateParam.s;
     }
-
-
 }
 
 
 void TerramechanicsSystem::TerramechanicsSystemPrivate::applyForce(int wheel_idx, gz::sim::EntityComponentManager &_ecm)
 {
-    WheelData& wheel = wheels[wheel_idx];
+  WheelData& wheel = wheels[wheel_idx];
 
-    // case forces are in contact frame
-    // contact frame: force -> z=0(keep gazebo's), xy = model's
-    gz::math::Vector3d force_to_add_contact(wheel.forces.F_x, wheel.forces.F_y, 0);
-    // M_y = M_z = 0, they are drive and steer joints resistent moments, but do not influence the rover movement
-    gz::math::Vector3d torque_to_add_contact(wheel.forces.M_x, 0, 0);
-    // gz::math::Vector3d torque_to_add_contact(this->forces.M_x, this->forces.M_y, this->forces.M_z);
+  // case forces are in contact frame
+  // contact frame: force -> z=0(keep gazebo's), xy = model's
+  gz::math::Vector3d force_to_add_contact(wheel.forces.F_x, wheel.forces.F_y, 0);
+  // M_y = M_z = 0, they are drive and steer joints resistent moments, but do not influence the rover movement
+  // gz::math::Vector3d torque_to_add_contact(wheel.forces.M_x, 0, 0);
+  gz::math::Vector3d torque_to_add_contact(wheel.forces.M_x, wheel.forces.M_y, wheel.forces.M_z);
 
-    // Transform to world frame
-    gz::math::Vector3d force_to_add = wheel.contact_frame_rot.RotateVector(force_to_add_contact);
-    gz::math::Vector3d torque_to_add = wheel.contact_frame_rot.RotateVector(torque_to_add_contact);
+  // Transform to world frame
+  gz::math::Vector3d force_to_add = wheel.contact_frame_rot.RotateVector(force_to_add_contact);
+  gz::math::Vector3d torque_to_add = wheel.contact_frame_rot.RotateVector(torque_to_add_contact);
 
-    // apply force/torque in world frame to the wheel
-    if (!options.passive_plugin)
-    {
-      gz::sim::Link link(wheel.linkEntity);
-      link.AddWorldWrench(_ecm, force_to_add, torque_to_add);
-    }
+  // apply force/torque in world frame to the wheel
+  if (!options.passive_plugin)
+  {
+    gz::sim::Link link(wheel.linkEntity);
+    link.AddWorldWrench(_ecm, force_to_add + wheel.friction_compensation, torque_to_add);
+  }
 
-    if (this->debug) {
-        gzmsg << "DB [" << wheel.name << "]: applied forces: " << 
-                        force_to_add.X() << " - " << force_to_add.Y() << " - " << 
-                        force_to_add.Z() << "\n\t\t\t\t\t\t\t\t\t\ttorques: " << 
-                        torque_to_add.X() << " - " << torque_to_add.Y() << " - " << 
-                        torque_to_add.Z() << std::endl;
-    }
+  if (this->debug) {
+      gzmsg << "DB [" << wheel.name << "]: applied terramechanic forces: " << 
+                      force_to_add.X() << " - " << force_to_add.Y() << " - " << 
+                      force_to_add.Z() << "\n\t\t\t\t\t\t\t\t\t\ttorques: " << 
+                      torque_to_add.X() << " - " << torque_to_add.Y() << " - " << 
+                      torque_to_add.Z() << std::endl;
+  }
 }
 
 
@@ -1254,7 +1266,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
     // 1. First collect all wheel states (serial)
     for (int i = 0; i < num_wheels; i++)
     {
-      auto steerPose = _ecm.Component<gz::sim::components::WorldPose>(wheels[i].steerEntity);
+      /* auto steerPose = _ecm.Component<gz::sim::components::WorldPose>(wheels[i].steerEntity);
       auto wheelPose = _ecm.Component<gz::sim::components::WorldPose>(wheels[i].linkEntity);
       if (wheelPose)
           _ecm.SetComponentData<gz::sim::components::Pose>(
@@ -1269,7 +1281,12 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
         wheels[i].contact_frame_rot =
             wheels[i].contact_frame_rot * gz::math::Quaterniond(0, 0, M_PI);
       }
-      wheels[i].contact_frame_rot.Normalize();
+      wheels[i].contact_frame_rot.Normalize(); */
+
+      getContactData(i, _ecm);
+
+      if (! wheels[i].in_contact)
+        continue;
 
       setSoilParams(i, _ecm);
       setWheelStateParams(i, _ecm);
@@ -1282,145 +1299,155 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::onUpdateFull(gz::sim::En
 
     // 2. Perform computations (parallel - safe)
     #pragma omp parallel for schedule(dynamic)
-    for (int i = 0; i < num_wheels; i++) {
-        // Skip static wheels
-        if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam->r_s) < 0.02) {
-            continue;
-        }
+    for (int i = 0; i < num_wheels; i++)
+    {
+      if (! wheels[i].in_contact)
+        continue;
 
-        // Computation-heavy tasks
-        setTunedParams(i);
-        computeWheelLoad(_ecm, i);
+      // Skip static wheels
+      if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam->r_s) < 0.02)
+        continue;
 
-        // Find sinkage and compute forces (computationally intensive)
-        if (findSinkage(i)) {
-            computeForces(i, nullptr);
-        }
+      // Computation-heavy tasks
+      setTunedParams(i);
+      // computeWheelLoad(_ecm, i); // Taken from contact sensors
+
+      // Find sinkage and compute forces (computationally intensive)
+      if (findSinkage(i)) {
+          computeForces(i, nullptr);
+      }
     }
 
     // 3. Apply forces (serial - safe)
-    for (int i = 0; i < num_wheels; i++) {
-        if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam->r_s) < 0.02) {
-            // Only zero velocities when wheel is in contact with terrain,
-            // otherwise gravity free-fall is blocked
-            if (!this->options.passive_plugin && !getTerrainBelow(i, _ecm).empty())
-            {
-                gz::sim::Link link(wheels[i].linkEntity);
-                link.SetLinearVelocity(_ecm, gz::math::Vector3d::Zero);
-                link.SetAngularVelocity(_ecm, gz::math::Vector3d::Zero);
-            }
-            continue;
-        }
+    for (int i = 0; i < num_wheels; i++)
+    {
+      if (! wheels[i].in_contact)
+        continue;
 
-        // Interact with physics engine (not thread-safe)
-        applyForce(i, _ecm);
+      if (fabs(wheels[i].stateParam.omega * wheels[i].wheelParam->r_s) < 0.02) {
+          // Only zero velocities when wheel is in contact with terrain,
+          // otherwise gravity free-fall is blocked
+          if (!this->options.passive_plugin)  // NOT SURE IF THIS IS NECESSARY ANYMORE
+          {
+              gz::sim::Link link(wheels[i].linkEntity);
+              link.SetLinearVelocity(_ecm, gz::math::Vector3d::Zero);
+              link.SetAngularVelocity(_ecm, gz::math::Vector3d::Zero);
+          }
+          continue;
+      }
 
-        // Publish results
-        if (this->publish_results) {
-            publishResults(i);
-        }
+      // Interact with physics engine (not thread-safe)
+      applyForce(i, _ecm);
+
+      // Publish results
+      if (this->publish_results) {
+          publishResults(i);
+      }
     }
 }
 
 
-void TerramechanicsSystem::TerramechanicsSystemPrivate::getContactsData(gz::sim::EntityComponentManager &_ecm)
+void TerramechanicsSystem::TerramechanicsSystemPrivate::getContactData(int wheel_idx, gz::sim::EntityComponentManager &_ecm)
 {
-  for (int ww = 0; ww <num_wheels; ww++)
+  WheelData& wheel = wheels[wheel_idx];
+  wheel.in_contact = false;
+  wheel.friction_compensation = gz::math::Vector3d(0,0,0);
+
+  auto comp = _ecm.Component<gz::sim::components::ContactSensorData>(wheel.contactSensorEntity);
+  if (comp)
   {
-    WheelData& wheel = wheels[ww];
-    wheel.in_contact = false;
-    wheel.friction_force = gz::math::Vector3d(0,0,0);
+    gz::math::Vector3d normal, force;
 
-    auto comp = _ecm.Component<gz::sim::components::ContactSensorData>(wheel.contactSensorEntity);
-    if (comp)
+    // Loop contact pairs
+    for (int c = 0; c < comp->Data().contact_size(); c++)
     {
-      gz::math::Vector3d normal, force;
+      auto contact = comp->Data().contact(c);
 
-      // Loop contact pairs
-      for (int c = 0; c < comp->Data().contact_size(); c++)
+      bool is_body_1;
+      std::string coll1 = contact.collision1().name();
+      std::string coll2 = contact.collision2().name();
+
+      if (auto it = collisionsToTerrainMap.find(coll2);
+          std::find(wheel.collision_names.begin(),wheel.collision_names.end(),coll1) != wheel.collision_names.end()
+          && it != collisionsToTerrainMap.end())
       {
-        auto contact = comp->Data().contact(c);
+        // Collision1 is the wheel and collision2 is a terrain
+        is_body_1 = true;
+        wheel.terrain_name = it->second;
+      } else if (auto it = collisionsToTerrainMap.find(coll1);
+          std::find(wheel.collision_names.begin(),wheel.collision_names.end(),coll2) != wheel.collision_names.end()
+          && it != collisionsToTerrainMap.end())
+      {
+        // Collision2 is the wheel and collision1 is a terrain
+        is_body_1 = false;
+        wheel.terrain_name = it->second;
+      } else {
+        // DEBUG if condition
+        if (!(std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll1) != wheel.collision_names.end())
+            && !(std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll2) != wheel.collision_names.end()))
+          gzerr << "Wheel collision is not one of the collisions? Something is wrong..." << std::endl;
 
-        bool is_body_1;
-        std::string coll1 = contact.collision1().name();
-        std::string coll2 = contact.collision2().name();
-
-        if ((std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll1) != wheel.collision_names.end())
-            && (auto it = terrainCollisionToLinkMap.find(coll2); it != terrainCollisionToLinkMap.end()))
-        {
-          // Collision1 is the wheel and collision2 is a terrain
-          is_body_1 = true;
-          terrain_name = it->second;
-        } else if ((std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll2) != wheel.collision_names.end())
-            && (auto it = terrainCollisionToLinkMap.find(coll1); it != terrainCollisionToLinkMap.end()))
-        {
-          // Collision2 is the wheel and collision1 is a terrain
-          is_body_1 = false;
-          terrain_name = it->second;
-        } else {
-          // DEBUG if condition
-          if (!(std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll1) != wheel.collision_names.end())
-              && !(std::find(wheel.collision_names.begin(), wheel.collision_names.end(), coll2) != wheel.collision_names.end()))
-            gzerr << "Wheel collision is not one of the collisions? Something is wrong..." << std::endl;
-
-          // Collision with some other non-terrain object. Neglected for this plugin
-          // Maybe normal force should be included anyway within wheel load(?) maybe not. Friction we keep
-          continue;
-        }
-
-        wheel.in_contact = true;
-        wheel.iters_without_contact = 0;
-
-        // Loop contact points
-        for (int ii = 0; ii < contact.position_size(); ii++)
-        {
-          if (is_body_1)
-          {
-            // normal points from collision1 to collision2, change sign
-            normal -= contact.normal(ii);
-            force += contact.wrench(ii).body_1_wrench().force();
-          }
-          else
-          {
-            normal += contact.normal(ii);
-            force += contact.wrench(ii).body_2_wrench().force();
-          }
-        }
+        // Collision with some other non-terrain object. Neglected for this plugin
+        // Maybe normal force should be included anyway within wheel load(?) maybe not. Friction we keep
+        continue;
       }
 
-      // Find normal and tangential force components
-      normal.normalize();
-
-      // set wheel load
-      wheel.forces.W = force.Dot(normal);
-
-      wheel.friction_force = force - normal * wheel.forces.W;
-
-      auto steerPose = _ecm.Component<gz::sim::components::WorldPose>(wheel.steerEntity);
-      if (steerPose)
-      {
-        gz::math::Vector3d steer_x = steerPose->Data().Rot().XAxis();
-
-        gz::math::Vector3d contact_x = (steer_x - steer_x.Dot(normal) * normal).normalize();
-        gz::math::Vector3d contact_y = normal.Cross(contact_x).normalize();
-
-        gz::math::Matrix3d contact_frame;
-        wheel.contact_frame_rot.SetFromMatrix(contact_frame.Axes(contact_x, contact_y, normal));
-
-        if (wheel.name.find("br") != std::string::npos ||
-            wheel.name.find("fr") != std::string::npos)
-        {
-          wheel.contact_frame_rot =
-              wheel.contact_frame_rot * gz::math::Quaterniond(0, 0, M_PI);
-        }
-        wheel.contact_frame_rot.Normalize();
-      }
-
-    }
-    else if(wheel.iters_without_contact < 3){
       wheel.in_contact = true;
-      wheel.iters_without_contact++;
+      wheel.iters_without_contact = 0;
+
+      // Loop contact points
+      for (int ii = 0; ii < contact.position_size(); ii++)
+      {
+        if (is_body_1)
+        {
+          // normal points from collision1 to collision2, change sign to have it ground to wheel
+          normal -= gz::msgs::Convert(contact.normal(ii));
+          force += gz::msgs::Convert(contact.wrench(ii).body_1_wrench().force());
+        }
+        else
+        {
+          normal += gz::msgs::Convert(contact.normal(ii));
+          force += gz::msgs::Convert(contact.wrench(ii).body_2_wrench().force());
+        }
+      }
     }
+
+    // Find normal and tangential force components
+    normal.Normalize();
+
+    // Set wheel load
+    wheel.forces.W = fabs(force.Dot(normal));
+
+    wheel.friction_compensation = -(force - normal * force.Dot(normal));
+
+    // Contact frame
+    auto steerPose = _ecm.Component<gz::sim::components::WorldPose>(wheel.steerEntity);
+    if (steerPose)
+    {
+      gz::math::Vector3d steer_x = steerPose->Data().Rot().XAxis();
+
+      gz::math::Vector3d contact_x = (steer_x - steer_x.Dot(normal) * normal).Normalize();
+      gz::math::Vector3d contact_y = normal.Cross(contact_x).Normalize();
+
+      gz::math::Matrix3d contact_frame;
+      contact_frame.SetAxes(contact_x, contact_y, normal);
+      wheel.contact_frame_rot.SetFromMatrix(contact_frame);
+
+      if (wheel.name.find("br") != std::string::npos ||
+          wheel.name.find("fr") != std::string::npos)
+      {
+        wheel.contact_frame_rot =
+            wheel.contact_frame_rot * gz::math::Quaterniond(0, 0, M_PI);
+      }
+      wheel.contact_frame_rot.Normalize();
+    }
+
+  }
+  else if(wheel.iters_without_contact < 3){
+    // still considered in contact for 3 more steps since contacts might "jump"
+    wheel.in_contact = true;
+    wheel.iters_without_contact++;
+    // Wheel load and terrain remains the last ones
   }
 }
 
@@ -1430,7 +1457,7 @@ GZ_ADD_PLUGIN(
     gz::sim::System,
     gz::sim::ISystemConfigure,
     gz::sim::ISystemPreUpdate,
-    gz::sim::ISystemPostUpdate,
+    // gz::sim::ISystemPostUpdate,
     gz::sim::ISystemReset)
 
 
