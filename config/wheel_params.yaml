@@ -21,10 +21,10 @@ drive_joints:
   - "Archimede_bl_drive_joint"
   - "Archimede_fl_drive_joint"
 
-# Contact sensors names (Contact sensors attached to the wheel links are required within the URDF)
-# Order: same as the wheel link names
-contact_sensors:
-  - "Archimede_br_contact_sensor"
-  - "Archimede_fr_contact_sensor"
-  - "Archimede_bl_contact_sensor"
-  - "Archimede_fl_contact_sensor"
+# # Contact sensors names (Contact sensors attached to the wheel links are required within the URDF)
+# # Order: same as the wheel link names
+# contact_sensors:
+#   - "Archimede_br_contact_sensor"
+#   - "Archimede_fr_contact_sensor"
+#   - "Archimede_bl_contact_sensor"
+#   - "Archimede_fl_contact_sensor"
