@@ -8,7 +8,8 @@
 #include <gz/sim/Link.hh>
 #include <gz/transport/Node.hh>
 #include <yaml-cpp/yaml.h>
-#include <gz/msgs/double_v.pb.h>
+// #include <gz/msgs/double_v.pb.h>
+#include <gz/msgs/float_v.pb.h>
 #include <gz/sim/components/Inertial.hh>
 #include <gz/sim/components/Pose.hh>
 #include <gz/sim/components/LinearVelocity.hh>
@@ -768,8 +769,10 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::initializeTransport()
   for (int i = 0; i < num_wheels; i++)
   {
     std::string prefix = "/terra/" + wheel_names[i];
-    wheels[i].forcesPub = node.Advertise<gz::msgs::Double_V>(prefix + "/forces");
-    wheels[i].statePub = node.Advertise<gz::msgs::Double_V>(prefix + "/state");
+    // wheels[i].forcesPub = node.Advertise<gz::msgs::Double_V>(prefix + "/forces");
+    // wheels[i].statePub = node.Advertise<gz::msgs::Double_V>(prefix + "/state");
+    wheels[i].forcesPub = node.Advertise<gz::msgs::Float_V>(prefix + "/forces");
+    wheels[i].statePub = node.Advertise<gz::msgs::Float_V>(prefix + "/state");
   }
   gzmsg << "[TerramechanicsSystem] Transport initialized" << std::endl;
 }
@@ -1308,7 +1311,8 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::publishResults(int wheel
   gz::math::Vector3d force_world = wheel.contact_frame_rot.RotateVector(force_contact);
   gz::math::Vector3d torque_world = wheel.contact_frame_rot.RotateVector(torque_contact);
 
-  gz::msgs::Double_V forceMsg;
+  // gz::msgs::Double_V forceMsg;
+  gz::msgs::Float_V forceMsg; // already supported in ros_gz_bridge
   forceMsg.add_data(force_contact.X());
   forceMsg.add_data(force_contact.Y());
   forceMsg.add_data(force_contact.Z());
@@ -1326,7 +1330,8 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::publishResults(int wheel
 
   if (publish_intermediate_values)
   {
-    gz::msgs::Double_V stateMsg;
+    // gz::msgs::Double_V stateMsg;
+    gz::msgs::Float_V stateMsg; // already supported in ros_gz_bridge
     stateMsg.add_data(wheel.stateParam.omega);
     stateMsg.add_data(wheel.stateParam.v_x);
     stateMsg.add_data(wheel.stateParam.v_y);
