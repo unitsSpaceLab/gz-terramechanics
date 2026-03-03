@@ -21,7 +21,11 @@
 #include <gz/sim/components/RaycastData.hh>
 #include <gz/sim/components/Physics.hh>
 #include <gz/sim/components/ContactSensor.hh>
+#include <gz/sim/components/Collision.hh>
+#include <gz/sim/EventManager.hh>
+#include <gz/sim/physics/Events.hh>
 
+#include <set>
 #include <iomanip> // debug only
 
 // Queste variabili sono dichiarate nel codice ma non vengono mai utilizzate: counter_ non viene mai letto né scritto, collision_name non viene mai impostato
@@ -145,7 +149,6 @@ struct TunedParams {
     TerramechanicsParams terraParam;
     Forces forces;
 
-    gz::math::Vector3d friction_compensation;
     int iters_without_contact = 10;
     bool in_contact = false;
     // std::vector<std::string> collision_names;
@@ -199,6 +202,9 @@ struct TunedParams {
 
   // Transport
   gz::transport::Node node;
+
+  // Contact surface customization (zero friction on wheels)
+  gz::common::ConnectionPtr contactSurfaceConnection;
 
 
   /* // World data
@@ -274,6 +280,48 @@ void TerramechanicsSystem::Configure(
 
     if (dataPtr->publish_results) {
         dataPtr->initializeTransport();
+    }
+
+    // Set friction to zero on wheel collisions via contact surface customization
+    // (gz-sim8 equivalent of Gazebo Classic's SetMuPrimary(0)/SetMuSecondary(0)/SetMuTorsion(0))
+    if (!dataPtr->options.passive_plugin)
+    {
+        // Collect all wheel collision entities into a set for fast lookup
+        std::set<gz::sim::Entity> wheelCollisions;
+        for (int i = 0; i < dataPtr->num_wheels; i++)
+            for (const auto &col : dataPtr->wheels[i].contactSensorsCollisionEntity)
+                if (col != gz::sim::kNullEntity)
+                    wheelCollisions.insert(col);
+
+        // Enable contact surface customization on each wheel collision
+        for (const auto &col : wheelCollisions)
+            _ecm.CreateComponent(col,
+                gz::sim::components::EnableContactSurfaceCustomization(true));
+
+        // Register callback to zero out friction before each physics step
+        dataPtr->contactSurfaceConnection =
+            _eventMgr.Connect<gz::sim::events::CollectContactSurfaceProperties>(
+                [wheelCollisions](
+                    const gz::sim::Entity &_col1,
+                    const gz::sim::Entity &_col2,
+                    const gz::math::Vector3d &/*_point*/,
+                    const std::optional<gz::math::Vector3d> /*_force*/,
+                    const std::optional<gz::math::Vector3d> /*_normal*/,
+                    const std::optional<double> /*_depth*/,
+                    const size_t /*_numContacts*/,
+                    gz::physics::SetContactPropertiesCallbackFeature::
+                        ContactSurfaceParams<gz::physics::FeaturePolicy3d> &_params)
+                {
+                    if (wheelCollisions.count(_col1) || wheelCollisions.count(_col2))
+                    {
+                        _params.frictionCoeff = 0.0;
+                        _params.secondaryFrictionCoeff = 0.0;
+                        _params.torsionalFrictionCoeff = 0.0; // not supported by DART
+                    }
+                });
+
+        gzmsg << "[TerramechanicsSystem] Contact surface friction set to 0 for "
+              << wheelCollisions.size() << " wheel collision(s)" << std::endl;
     }
 
     dataPtr->plugin_state_ = TerramechanicsSystemPrivate::PluginState::INITIALIZED;
@@ -636,13 +684,6 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::initializeWheel(int whee
 
   gz::sim::Link steerLink(wheel.steerEntity);
   steerLink.EnableVelocityChecks(_ecm, true);
-
-  //da vedere !! 
-  /* if (!options.passive_plugin)
-  {
-    gzwarn << "TERRAMECHANICS: Set wheel collision friction=0 in SDF" << std::endl;
-    gzwarn << "Example: <surface><friction><ode><mu>0</mu></ode></friction></surface>" << std::endl;
-  } */
 
   // Set wheel parameters
   setWheelParams(wheel_idx);
@@ -1245,7 +1286,7 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::applyForce(int wheel_idx
   if (!options.passive_plugin)
   {
     gz::sim::Link link(wheel.linkEntity);
-    link.AddWorldWrench(_ecm, force_to_add + wheel.friction_compensation, torque_to_add);
+    link.AddWorldWrench(_ecm, force_to_add, torque_to_add);
   }
 
   if (this->debug) {
@@ -1419,7 +1460,6 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::getContactData(int wheel
 {
   WheelData& wheel = wheels[wheel_idx];
   wheel.in_contact = false;
-  wheel.friction_compensation = gz::math::Vector3d(0,0,0);
   gz::math::Vector3d normal, force;
 
   for (const auto &collisionEntity : wheel.contactSensorsCollisionEntity)
@@ -1494,8 +1534,6 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::getContactData(int wheel
 
     // Set wheel load
     wheel.forces.W = fabs(force.Dot(normal));
-
-    wheel.friction_compensation = -(force - normal * force.Dot(normal));
 
     // Contact frame
     auto steerPose = _ecm.Component<gz::sim::components::WorldPose>(wheel.steerEntity);
