@@ -184,7 +184,6 @@ struct TunedParams {
 
   std::array<std::string, num_wheels> wheel_names;
   std::array<std::string, num_wheels> joint_names;
-  // std::array<std::string, num_wheels> contact_sensor_names;
 
   std::array<WheelData, num_wheels> wheels;
 
@@ -192,7 +191,7 @@ struct TunedParams {
   Options options;
   std::unordered_map<std::string, SoilParams> soils;
   std::vector<std::pair<std::string, std::string>> terrainSoilMap;  // pattern -> soil
-  std::unordered_map<std::string, std::string> collisionsToTerrainMap;
+  std::unordered_map<gz::sim::Entity, std::string> collisionsToTerrainMap;
   std::string defaultSoil;
 
 
@@ -302,7 +301,7 @@ void TerramechanicsSystem::Configure(
         // Register callback to zero out friction before each physics step
         dataPtr->contactSurfaceConnection =
             _eventMgr.Connect<gz::sim::events::CollectContactSurfaceProperties>(
-                [wheelCollisions](
+                [wheelCollisions, collisionsToTerrainMap=dataPtr->collisionsToTerrainMap](
                     const gz::sim::Entity &_col1,
                     const gz::sim::Entity &_col2,
                     const gz::math::Vector3d &/*_point*/,
@@ -313,7 +312,9 @@ void TerramechanicsSystem::Configure(
                     gz::physics::SetContactPropertiesCallbackFeature::
                         ContactSurfaceParams<gz::physics::FeaturePolicy3d> &_params)
                 {
-                    if (wheelCollisions.count(_col1) || wheelCollisions.count(_col2))
+                    if ((wheelCollisions.count(_col1) || wheelCollisions.count(_col2))
+                      && (collisionsToTerrainMap.find(_col1) != collisionsToTerrainMap.end() 
+                        || collisionsToTerrainMap.find(_col2) != collisionsToTerrainMap.end()))
                     {
                         _params.frictionCoeff = 0.0;
                         _params.secondaryFrictionCoeff = 0.0;
@@ -326,7 +327,7 @@ void TerramechanicsSystem::Configure(
     }
 
     dataPtr->plugin_state_ = TerramechanicsSystemPrivate::PluginState::INITIALIZED;
-    
+
     if (dataPtr -> options.passive_plugin)
     {
         gzmsg << "[TerramechanicsSystem] Plugin successfully loaded in passive mode" << std::endl;
@@ -537,15 +538,11 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::initializePluginParam(
 
           for (auto coll : link.Collisions(_ecm))
           {
-              auto nameComp = _ecm.Component<gz::sim::components::Name>(coll);
-              if (!nameComp) continue;
+              if (coll == gz::sim::kNullEntity) continue;
 
-              std::string scoped_name = terrainName + "::" + _ecm.Component<gz::sim::components::Name>(linkEntity)->Data() +
-                "::" + nameComp->Data();
+              collisionsToTerrainMap[coll] = terrainName;
 
-              collisionsToTerrainMap[scoped_name] = terrainName;
-
-              gzmsg << "[TerramechanicsSystem] Collision [" << scoped_name << "] found for terrain [" << terrainName << "]" << std::endl;
+              gzmsg << "[TerramechanicsSystem] Collision entity [" << coll << "] found for terrain model [" << terrainName << "]" << std::endl;
           }
       }
 
@@ -616,24 +613,6 @@ bool TerramechanicsSystem::TerramechanicsSystemPrivate::initializeWheel(int whee
     gzerr << "Steer link [" << parentLinkName.value() << "] not found" << std::endl;
     return false;
   }
-
-  /* // Get contact sensor entity by name
-  gz::sim::Link wheelLink(wheel.linkEntity);
-
-  wheel.contactSensorEntity = wheelLink.SensorByName(_ecm, contact_sensor_names[wheel_idx]);
-  if (wheel.contactSensorEntity == gz::sim::kNullEntity)
-  {
-    gzerr << "Contact Sensor not found: " << contact_sensor_names[wheel_idx] << std::endl;
-    return false;
-  }
-
-  // Get wheel collisions
-  for (auto coll : wheelLink.Collisions(_ecm))
-  {
-      auto nameComp = _ecm.Component<gz::sim::components::Name>(coll);
-      if (!nameComp) continue;
-      wheel.collision_names.push_back(nameComp->Data());
-  } */
 
   // Discover wheel's contact sensors and attached collisions
   gz::sim::Link wheelLink(wheel.linkEntity);
@@ -1478,14 +1457,12 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::getContactData(int wheel
         const auto &contact = comp->Data().contact(c);
 
         bool is_body_1;
-        std::string coll1 = contact.collision1().name();
-        std::string coll2 = contact.collision2().name();
+        gz::sim::Entity coll1 = contact.collision1().id();
+        gz::sim::Entity coll2 = contact.collision2().id();
 
-        std::string target_name = _ecm.Component<gz::sim::components::Name>(collisionEntity)->Data();
-
-        if (coll1.substr(coll1.rfind("::") + 2) != target_name && coll2.substr(coll2.rfind("::") + 2) != target_name)
+        if (coll1 != collisionEntity && coll2 != collisionEntity)
         {
-          gzwarn << "Wheel collision is not one of the collisions detected by its sensor? Something is wrong..." << std::endl;
+          gzwarn << "Wheel collision not detected by its own sensor? Something is wrong..." << std::endl;
           continue;
         }
 
