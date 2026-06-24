@@ -324,16 +324,13 @@ void TerramechanicsSystem::Configure(
 
         gzmsg << "[TerramechanicsSystem] Contact surface friction set to 0 for "
               << wheelCollisions.size() << " wheel collision(s)" << std::endl;
+
+        gzmsg << "[TerramechanicsSystem] Plugin successfully loaded"<< std::endl;
+    } else {
+        gzmsg << "[TerramechanicsSystem] Plugin successfully loaded in passive mode" << std::endl;
     }
 
     dataPtr->plugin_state_ = TerramechanicsSystemPrivate::PluginState::INITIALIZED;
-
-    if (dataPtr -> options.passive_plugin)
-    {
-        gzmsg << "[TerramechanicsSystem] Plugin successfully loaded in passive mode" << std::endl;
-    } else {
-        gzmsg << "[TerramechanicsSystem] Plugin successfully loaded"<< std::endl;
-    }
 
     /* auto worldEntity = _ecm.EntityByComponents(gz::sim::components::World());
     _ecm.CreateComponent(worldEntity, gz::sim::components::PhysicsCollisionDetector("bullet"));
@@ -477,15 +474,6 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::initializePluginParam(
     } else {
       gzerr << "drive_joints not found or invalid in wheel_params.yaml (need " << num_wheels << " entries)" << std::endl;
     }
-
-    /* if (wheelConfig["contact_sensors"] && wheelConfig["contact_sensors"].size() == num_wheels) {
-      for (int i = 0; i < num_wheels; ++i) {
-        contact_sensor_names[i] = wheelConfig["contact_sensors"][i].as<std::string>();
-      }
-      gzmsg << "[TerramechanicsSystem] Loaded contact sensors names from config" << std::endl;
-    } else {
-      gzerr << "[TerramechanicsSystem] contact_sensors not found or invalid in wheel_params.yaml (need " << num_wheels << " entries)" << std::endl;
-    } */
 
     // Load soil parameters
     YAML::Node soilConfig = YAML::LoadFile(configPath + "/soil_params.yaml");
@@ -1232,11 +1220,11 @@ void TerramechanicsSystem::TerramechanicsSystemPrivate::setTunedParams(int wheel
         wheel.tunedParam.n1 = 0.01;
         wheel.tunedParam.n2 = 0.74;
     }
-    
+
     wheel.tunedParam.d0 = 1;
     wheel.tunedParam.d1 = 0.5;
-    
-      // case n is already set for the soil
+
+    // case n is already set for the soil
     if (std::isnan(wheel.soilParam->n0)) {
         wheel.tunedParam.n_effective = wheel.soilParam->n;
         return;
